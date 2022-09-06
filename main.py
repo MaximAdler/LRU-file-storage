@@ -18,7 +18,7 @@ class MongoDB:
         """Modifies record to the collection"""
         pass
 
-    def delete(self):
+    def delete(self, collection: str, **rules) -> None:
         """Deletes record"""
         pass
 
@@ -80,7 +80,6 @@ class LRUStorage:
         self.chat_id = chat_id
         self.__mongo = mongo()
         self.__s3 = s3()
-        self.router = self._get_router()
 
     def _get_head(self) -> Dict[str, Any]:
         """Gets head from MongoDB. If no head, then it creates a new one"""
@@ -116,16 +115,15 @@ class LRUStorage:
         record = self.__mongo(collection='lru_node', id=_id)
         return record
 
-    def _get_router(self) -> Dict[str, str]:
-        """Gets router (hashmap) from MongoDB"""
-
-        # record: id (str), user_id (int), router ({filename: lru_head.id, ...})
-        record = self.__mongo.get_one(collection='lru_router', user_id=self.user_id)
-        return record['router']
-
     def get(self, filename: str) -> Optional[str]:
         """Gets file from s3 bucket and moves file to the most frequent used position in MongoDB"""
-        lru_node_id = self.router.get(filename, None)
+
+        # record: id (str), user_id (int), filename (str), node_id (str)
+        lru_node_id = self.__mongo.get_one(
+            collection='lru_router',
+            user_id=self.user_id,
+            filename=filename
+        )
 
         if not lru_node_id:
             return None
@@ -158,17 +156,20 @@ class LRUStorage:
                 id=tail['prev_id']
             )
             self.__remove(last_node['id'])
-            self.router.pop(last_node['filename'])
-            self.router = self.__mongo.modify(
+            self.__mongo.delete(
                 collection='lru_router',
-                data=dict(router=self.router),
-                user_id=self.user_id
+                user_id=self.user_id,
+                filename=last_node['filename']
             )
             self.__s3.delete_file(path=last_node['filename'])
 
     def put(self, filename: str, file: str) -> None:
         """Puts file to s3 bucket as the most frequent used file"""
-        lru_node_id = self.router.get(filename, None)
+        lru_node_id = self.__mongo.get_one(
+            collection='lru_router',
+            user_id=self.user_id,
+            filename=filename
+        )
         new_file_size = self.__get_file_size(file=file)
 
         if lru_node_id:
@@ -196,11 +197,9 @@ class LRUStorage:
                 'head': True
             }
         )
-        self.router[filename] = new_node_id
-        self.__mongo.modify(
+        lru_node_id = self.__mongo.create(
             collection='lru_router',
-            data=dict(router=self.router),
-            user_id=self.user_id
+            data=dict(node_id=new_node_id, user_id=self.user_id, filename=filename)
         )
 
     def __remove(self, node: Dict[str, Any]) -> None:
